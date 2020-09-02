@@ -1,0 +1,104 @@
+{
+/*
+Check in explorer: https://testnetexplorer.obyte.org/#49jHMH3jBkeK19r7MxnV5Fz3A9M+sQKthv7nLkhmSc8=
+Agent address: XIHQUURH2TXT4RM5WIXUQAQIVOOQKAY5
+*/
+    bounce_fees: { base: 10000 },
+    init: "{
+        // admin stuff
+		$this = {
+			name: "NUDGER", 
+			use_case_1: "Propose a reward to receive a futur trigger (all request fields are optional)",
+			use_case_2: "Get the reward by being the first to trigger in time with related tag",
+			owner:"O7NYCFUL5XIJTYE3O4MKGMGMTN6ATQAJ",  // to collect the dust when the aa is not in use.
+			default_acceptable_delay_in_seconds : 10*24*60*60,
+			number_of_request : json_parse(var["number of request"] otherwise 0)
+		}; 
+    }",
+   	messages: {
+      cases: [
+		  { if: "{ !!trigger.data.nudge_with_tag }", // too late, send back to origin
+            init: "{ 
+			$tag = trigger.data.nudge_with_tag;
+			$nudge = json_parse(var[$tag] otherwise bounce ("Too late or wrong tag"));
+			// validity tests
+			if ($nudge.time > timestamp) bounce ("Too early, try at "||timestamp_to_string($nudge.time));
+			if (!!$nudge.private_nudger and $nudge.private_nudger != trigger.address) bounce ("Private reward!");
+			
+			$late_nudge = timestamp > $nudge.deadline;
+			$reward_destination = $late_nudge ? $nudge.address_to_trigger : trigger.address;
+            }",
+            messages: [
+                { 
+					app: "data", payload: {tag: "{$tag}"} 
+				},
+                { 	
+					if: '{ $nudge.reward_asset != "base" }', 
+					app: "payment",  payload: { 
+						asset: "{$nudge.reward_asset}", 
+						outputs: [{ 
+							address: "{ $reward_destination }", 
+							amount: "{ $nudge.reward_amount }" 
+						}]
+					}
+                },
+                { 
+					app: "payment", payload: { 
+						asset: "base", 
+						outputs: [ { 
+							address: "{ $reward_destination }", 
+							amount: "{ $nudge.reward_amount }" 
+						},{ 
+							if: '{ !$late_nudge }', 
+							address: "{ $nudge.address_to_trigger }", 
+							amount: "{ 1 }" 
+						} ]
+					}
+                },
+                { 
+					app: "state", 
+					state: "{ 
+						var[$tag] = false;   
+						var["number of request"] = $this.number_of_request -1;
+						response['message'] = $late_nudge ? "Too late, sorry !" : trigger.address||" has been rewarded ^^"; 
+					}" 
+				}
+            ]
+         },
+		 { if: "{ $this.number_of_request < 1 and trigger.address == $this.owner  }", // dust collection
+            messages: [
+                { 
+					app: "payment", payload: { 
+						asset: "base", 
+						outputs: [ { 
+							address: "{ $this.owner }" 
+						}]
+					}
+                }
+            ]
+         },
+         { // request
+            messages: [
+                { app: "state", state: "{
+					$requested_time = trigger.data.requested_time otherwise timestamp;
+					$acceptable_delay = trigger.data.requested_acceptable_delay 
+						otherwise $this.default_acceptable_delay_in_seconds;
+					$request = {
+						address_to_trigger: trigger.data.requester_address otherwise trigger.address,
+						time: $requested_time,
+						deadline: $requested_time + $acceptable_delay,
+						private_nudger: trigger.data.requested_nudger,
+						reward_amount: trigger.output[[asset!=base]].amount otherwise trigger.output[[asset=base]].amount-2000,
+						reward_asset: trigger.output[[asset!=base]].asset != "none"? trigger.output[[asset!=base]].asset: "base",
+					};
+					$request_tag = trigger.data.requested_tag otherwise sha256($request.address||$request.time); 
+					if (!!var[$request_tag]) bounce ("this tag already exist!");
+					var[$request_tag] = json_stringify($request);
+					var["number of request"] = $this.number_of_request + 1;
+					response['message'] = "Trigger-Request "||$request_tag||" created"; 
+                }"}
+            ]
+         }
+      ]
+   	}
+}
